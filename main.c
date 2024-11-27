@@ -32,7 +32,7 @@ const char* NOT_FOUND =  "HTTP/1.1 404 Not Found \r\n"
                     "<h1> Not Found </h1>"
                     "<pre>There is no registry for the name your provided.</pre>";
 
-char* REDIRECT_RESPONSE(char * to) {
+char* createRedirectResponse(char * to) {
     char* location = malloc(REDIRECT_RESPONSE_SIZE);
     if (location == NULL) {
         return NULL;
@@ -52,9 +52,10 @@ char* REDIRECT_RESPONSE(char * to) {
 char* getPath(int cfd) {
     char* buffer = malloc(BUFFER_SIZE);
     char* path = malloc(PATH_SIZE);
-    if (!buffer || !path) {
-        perror("Failed to allocate memory for getPath");
-        exit(EXIT_FAILURE);
+
+    if (buffer == NULL || path == NULL) {
+        perror("memory for getPath was not able to be allocated");
+        return NULL;
     }
 
     ssize_t bytes_read = read(cfd, buffer, BUFFER_SIZE);
@@ -75,6 +76,7 @@ char* getPath(int cfd) {
 }
 
 
+// getLongURL gets the long url from a named url from path.
 char* getLongURL(void *namedURLS, int namedURLS_size, char* path) {
     struct NamedURL namedURL;
     int i = 0;
@@ -91,29 +93,42 @@ char* getLongURL(void *namedURLS, int namedURLS_size, char* path) {
     return NULL;
 }
 
-char* LIST_RESPONSE(void *namedURLS, int namedURLS_size){
-    char* response = malloc(LIST_RESPONSE_SIZE);
-    char* body = malloc(namedURLS_size * 256 + 256);
+// createListResponse generates a response of named URLs.
+char* createListResponse(const struct NamedURL *namedURLs, int namedURLsSize) {
+    size_t bodySize = namedURLsSize * 256 + 256;
+    char *body = malloc(bodySize);
+    char *response = malloc(bodySize + 512);
 
-    struct NamedURL namedURL;
-    int i = 0;
-    while (i < namedURLS_size) {
-        int start = i * sizeof(struct NamedURL);
-        memcpy((void *)&namedURL, &namedURLS[start], sizeof(struct NamedURL));
-        sprintf(&body[i * 256], "<li><a href='%s'>%s</a></li>", namedURL.url, namedURL.name); // max size 177 bytes
-        i += 1;
+    if (body == NULL || response == NULL) {
+        perror("memory allocations for list response failed");
+        free(body);
+        free(response);
+        return NULL;
     }
 
-    sprintf(response,
-        "HTTP/1.1 200 OK \r\n"
-        "Cache-Control: no-store\r\n"
-        "Content-Type: text/html\r\n"
-        "Content-Length: %lu\r\n"
-        "\r\n"
-        "%s",
-        strlen(body), body);
+    body[0] = '\0';  // Initialize body to an empty string
+    for (int i = 0; i < namedURLsSize; i++) {
+        snprintf(body + strlen(body), bodySize - strlen(body),
+                 "<li><a href='%s'>%s</a></li>", namedURLs[i].url, namedURLs[i].name);
+    }
+
+    int written = snprintf(response, bodySize + 512,
+                           "HTTP/1.1 200 OK\r\n"
+                           "Cache-Control: no-store\r\n"
+                           "Content-Type: text/html\r\n"
+                           "Content-Length: %lu\r\n"
+                           "\r\n"
+                           "%s",
+                           strlen(body), body);
 
     free(body);
+
+    if (written < 0 || written >= (int)(bodySize + 512)) {
+        perror("list response buffer overflow");
+        free(response);
+        return NULL;
+    }
+
     return response;
 }
 
@@ -126,6 +141,12 @@ int main() {
     helloWorld.name = "/yt";
     helloWorld.url = "https://youtube.com";
     memcpy(namedURLS, &helloWorld, sizeof(struct NamedURL));
+    namedURLS_size += 1;
+
+    struct NamedURL helloWorld2;
+    helloWorld2.name = "/gm";
+    helloWorld2.url = "https://gmail.com";
+    memcpy(namedURLS + sizeof(struct NamedURL), &helloWorld2, sizeof(struct NamedURL));
     namedURLS_size += 1;
 
 
@@ -176,7 +197,7 @@ int main() {
         }
 
         if (strcmp(path, "/list") == 0) {
-            char *response = LIST_RESPONSE(namedURLS, namedURLS_size);
+            char *response = createListResponse(namedURLS, namedURLS_size);
             if (response != NULL) {
                 if (write(cfd, response, strlen(response)) == -1) {
                     perror("write to a peer connection for list response failed");
@@ -201,8 +222,7 @@ int main() {
             continue;
         }
 
-
-        char *response = REDIRECT_RESPONSE(longurl);
+        char *response = createRedirectResponse(longurl);
         if (response != NULL) {
             if (write(cfd, response, strlen(response)) == -1) {
                 perror("write to a peer connection for redirect response failed");
@@ -219,4 +239,8 @@ int main() {
         shutdown(cfd, SHUT_WR);
         close(cfd);
     }
+
+    // unreachable code
+    close(sfd);
+    free(namedURLS);
 }
