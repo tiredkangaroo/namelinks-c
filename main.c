@@ -5,10 +5,17 @@
 #include <netinet/in.h>
 #include <unistd.h>
 
-#define BUFFER_SIZE 120
-#define PATH_SIZE 24
+// BUFFER_SIZE specifies the size of the HTTP buffer to
+// intake in order to get the path from the request.
+#define BUFFER_SIZE 160
 
-#define DEFAULT_NAMEDURLS_SIZE 128
+// NAME_SIZE specifies the size of a name for the named
+// URL.
+#define NAME_SIZE 24
+
+// DEFAULT_NAMEDURLS_SIZE specifies the number of named
+// URLs to allocate memory for by default.
+#define DEFAULT_NAMEDURLS_SIZE 16
 
 // REDIRECT_RESPONSE_SIZE specifies the size for a redirect
 // HTTP response. Since the max size for a long URL is 128,
@@ -19,11 +26,15 @@
 // /list. Rough calculations suggest the size specified.
 #define LIST_RESPONSE_SIZE (namedURLS_size * 256) + 512
 
+// NamedURL represents a named URL, which is used to redirect
+// a request.
 struct NamedURL {
     char* name;
     char* url;
 };
 
+// NOT_FOUND is an HTTP response that represents a response
+// returned when a name doesn't exist.
 const char* NOT_FOUND =  "HTTP/1.1 404 Not Found \r\n"
                     "Content-Type: text/html\r\n"
                     "Connection: close\r\n"
@@ -32,6 +43,9 @@ const char* NOT_FOUND =  "HTTP/1.1 404 Not Found \r\n"
                     "<h1> Not Found </h1>"
                     "<pre>There is no registry for the name your provided.</pre>";
 
+// createRedirectResponse returns a redirect response that
+// redirects the browser to the link specified in the
+// parameter.
 char* createRedirectResponse(char * to) {
     char* location = malloc(REDIRECT_RESPONSE_SIZE);
     if (location == NULL) {
@@ -51,7 +65,7 @@ char* createRedirectResponse(char * to) {
 // the connection file descriptor.
 char* getPath(int cfd) {
     char* buffer = malloc(BUFFER_SIZE);
-    char* path = malloc(PATH_SIZE);
+    char* path = malloc(NAME_SIZE);
 
     if (buffer == NULL || path == NULL) {
         perror("memory for getPath was not able to be allocated");
@@ -77,6 +91,8 @@ char* getPath(int cfd) {
     return NULL;
 }
 
+// split writes multiple strings to buf from s seperated
+// by the delimiter.
 int split(char* buf, char* s, char delim) {
     int s_len = strlen(s);
     int s_pos = 0;
@@ -119,13 +135,12 @@ char* getLongURL(void *namedURLS, int namedURLS_size, char* path) {
         int start = i * sizeof(struct NamedURL);
         memcpy((void *)(&namedURL), &namedURLS[start], sizeof(struct NamedURL));
         if (strcmp(namedURL.name, name) == 0) {
-            char* longURL = malloc(128 + PATH_SIZE);
+            char* longURL = malloc(128 + NAME_SIZE);
             if (longURL == NULL) {
                 return NULL;
             }
             strncpy(longURL, namedURL.url, strlen(namedURL.url));
             strncpy(&longURL[strlen(namedURL.url)], &path[strlen(name) + 1], strlen(path)-strlen(name) + 1);
-            fprintf(stdout, "path: %s, name: %s, pathlen: %lu, namelen: %lu, longURL: %s\n", path, name, strlen(path), strlen(name), longURL);
             return longURL;
         }
         i += 1;
