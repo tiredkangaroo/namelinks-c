@@ -55,6 +55,8 @@ char* getPath(int cfd) {
 
     if (buffer == NULL || path == NULL) {
         perror("memory for getPath was not able to be allocated");
+        free(buffer);
+        free(path);
         return NULL;
     }
 
@@ -75,18 +77,56 @@ char* getPath(int cfd) {
     return NULL;
 }
 
+int split(char* buf, char* s, char delim) {
+    int s_len = strlen(s);
+    int s_pos = 0;
+
+    int element_start = 0;
+    int buf_pos = 0;
+
+    int num_elements = 0;
+
+    while (s_pos <= s_len) {
+        if (s[s_pos] == delim || s[s_pos] == '\0') {
+            int element_len = s_pos - element_start;
+            if (element_len > 0) {
+                memcpy(&buf[buf_pos], &s[element_start], element_len);
+                buf[buf_pos + element_len] = '\0';
+
+                element_start = s_pos + 1;
+                buf_pos += element_len + 1;
+                num_elements++;
+            }
+        }
+        s_pos++;
+    }
+
+    return num_elements;
+}
 
 // getLongURL gets the long url from a named url from path.
 char* getLongURL(void *namedURLS, int namedURLS_size, char* path) {
     struct NamedURL namedURL;
     int i = 0;
-    char *name = path;
+
+
+    char buf[strlen(path) * 2 + 1];
+    split(buf, &path[1], '/'); // split path: start from index 1 to avoid the first /
+
+    char name[strlen(buf)];
+    strncpy(name, buf, strlen(buf) + 1);
     while (i < namedURLS_size) {
         int start = i * sizeof(struct NamedURL);
         memcpy((void *)(&namedURL), &namedURLS[start], sizeof(struct NamedURL));
-        if (strcmp(namedURL.name, path) == 0) {
-            // add logic for adding the extra parts here
-            return namedURL.url;
+        if (strcmp(namedURL.name, name) == 0) {
+            char* longURL = malloc(128 + PATH_SIZE);
+            if (longURL == NULL) {
+                return NULL;
+            }
+            strncpy(longURL, namedURL.url, strlen(namedURL.url));
+            strncpy(&longURL[strlen(namedURL.url)], &path[strlen(name) + 1], strlen(path)-strlen(name) + 1);
+            fprintf(stdout, "path: %s, name: %s, pathlen: %lu, namelen: %lu, longURL: %s\n", path, name, strlen(path), strlen(name), longURL);
+            return longURL;
         }
         i += 1;
     }
@@ -132,13 +172,14 @@ char* createListResponse(const struct NamedURL *namedURLs, int namedURLsSize) {
     return response;
 }
 
+
 int main() {
     void *namedURLS = malloc(sizeof(struct NamedURL) * DEFAULT_NAMEDURLS_SIZE);
     int namedURLS_size = 0;
 
     // example for testing:
     struct NamedURL helloWorld;
-    helloWorld.name = "/yt";
+    helloWorld.name = "yt";
     helloWorld.url = "https://youtube.com";
     memcpy(namedURLS, &helloWorld, sizeof(struct NamedURL));
     namedURLS_size += 1;
@@ -211,7 +252,6 @@ int main() {
         }
 
         char* longurl = getLongURL(namedURLS, namedURLS_size, path);
-
         if (longurl == NULL) {
             if (write(cfd, NOT_FOUND, strlen(NOT_FOUND)) == -1) {
                 perror("write to a peer connection for not found failed");
@@ -222,7 +262,9 @@ int main() {
             continue;
         }
 
+
         char *response = createRedirectResponse(longurl);
+        free(longurl);
         if (response != NULL) {
             if (write(cfd, response, strlen(response)) == -1) {
                 perror("write to a peer connection for redirect response failed");
