@@ -1,9 +1,11 @@
+#include "hiredis/read.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <hiredis/hiredis.h>
 
 // BUFFER_SIZE specifies the size of the HTTP buffer to
 // intake in order to get the path from the request.
@@ -12,6 +14,8 @@
 // NAME_SIZE specifies the size of a name for the named
 // URL.
 #define NAME_SIZE 24
+
+#define LONGURL_SIZE = 128
 
 // DEFAULT_NAMEDURLS_SIZE specifies the number of named
 // URLs to allocate memory for by default.
@@ -24,7 +28,7 @@
 
 // LIST_RESPONSE_SIZE specifies the size for a response to
 // /list. Rough calculations suggest the size specified.
-#define LIST_RESPONSE_SIZE (namedURLS_size * 256) + 512
+#define LIST_RESPONSE_SIZE (reply -> elements * 256) + 512
 
 // NamedURL represents a named URL, which is used to redirect
 // a request.
@@ -121,53 +125,53 @@ int split(char* buf, char* s, char delim) {
 }
 
 // getLongURL gets the long url from a named url from path.
-char* getLongURL(void *namedURLS, int namedURLS_size, char* path) {
-    struct NamedURL namedURL;
-    int i = 0;
+char* getLongURL(redisContext* redisctx, char* path) {
+    char cmd[strlen(path) + 24];
+    snprintf(cmd, strlen(path) + 24, "HGET namelinks %s", &path[1]); // no need for snprintf here
 
-
-    char buf[strlen(path) * 2 + 1];
-    split(buf, &path[1], '/'); // split path: start from index 1 to avoid the first /
-
-    char name[strlen(buf)];
-    strncpy(name, buf, strlen(buf) + 1);
-    while (i < namedURLS_size) {
-        int start = i * sizeof(struct NamedURL);
-        memcpy((void *)(&namedURL), &namedURLS[start], sizeof(struct NamedURL));
-        if (strcmp(namedURL.name, name) == 0) {
-            char* longURL = malloc(128 + NAME_SIZE);
-            if (longURL == NULL) {
-                return NULL;
-            }
-            strncpy(longURL, namedURL.url, strlen(namedURL.url));
-            strncpy(&longURL[strlen(namedURL.url)], &path[strlen(name) + 1], strlen(path)-strlen(name) + 1);
-            return longURL;
+    redisReply *reply = redisCommand(redisctx, cmd);
+    if (reply -> type != REDIS_REPLY_STRING) {
+        if (reply -> type == REDIS_REPLY_ERROR) {
+            fprintf(stderr, "redis getLongURL error: %s", reply -> str);
         }
-        i += 1;
-    }
-    return NULL;
-}
-
-// createListResponse generates a response of named URLs.
-char* createListResponse(const struct NamedURL *namedURLs, int namedURLsSize) {
-    size_t bodySize = namedURLsSize * 256 + 256;
-    char *body = malloc(bodySize);
-    char *response = malloc(bodySize + 512);
-
-    if (body == NULL || response == NULL) {
-        perror("memory allocations for list response failed");
-        free(body);
-        free(response);
+        freeReplyObject(reply);
         return NULL;
     }
 
-    body[0] = '\0';  // Initialize body to an empty string
-    for (int i = 0; i < namedURLsSize; i++) {
-        snprintf(body + strlen(body), bodySize - strlen(body),
-                 "<li><a href='%s'>%s</a></li>", namedURLs[i].url, namedURLs[i].name);
+    char *longURL = malloc(reply -> len);
+    strncpy(longURL, reply -> str, reply -> len);
+    freeReplyObject(reply);
+    return longURL;
+}
+
+// createListResponse generates a response of named URLs.
+char* createListResponse(redisContext *redisctx) {
+    redisReply *reply = redisCommand(redisctx, "HGETALL namelinks");
+    if (reply -> type != REDIS_REPLY_ARRAY) {
+        if (reply -> type == REDIS_REPLY_ERROR) {
+            fprintf(stderr, "redis createListResponse error: %s", reply->str);
+        }
+        freeReplyObject(reply);
+        return NULL;
+    }
+    char body[reply -> elements * 256];
+    char* response = malloc(reply -> elements * 256 + 256);
+    if (response == NULL) {
+        fprintf(stderr, "allocations for createListResponse failed\n");
+        free(response);
+        return NULL;
+    }
+    int body_pos = 0;
+
+    size_t i = 0;
+    while (i < reply -> elements) {
+        char* key = reply -> element[i] -> str;
+        char* value = reply -> element[i + 1] -> str;
+        body_pos += snprintf(&body[body_pos], 256, "<li><a href='%s'>%s</a></li>", value, key);
+        i += 2;
     }
 
-    int written = snprintf(response, bodySize + 512,
+    snprintf(response, reply -> elements * 256 + 256,
                            "HTTP/1.1 200 OK\r\n"
                            "Cache-Control: no-store\r\n"
                            "Content-Type: text/html\r\n"
@@ -176,41 +180,22 @@ char* createListResponse(const struct NamedURL *namedURLs, int namedURLsSize) {
                            "%s",
                            strlen(body), body);
 
-    free(body);
-
-    if (written < 0 || written >= (int)(bodySize + 512)) {
-        perror("list response buffer overflow");
-        free(response);
-        return NULL;
-    }
-
     return response;
 }
 
 
 int main() {
-    void *namedURLS = malloc(sizeof(struct NamedURL) * DEFAULT_NAMEDURLS_SIZE);
-    int namedURLS_size = 0;
-
-    // example for testing:
-    struct NamedURL helloWorld;
-    helloWorld.name = "yt";
-    helloWorld.url = "https://youtube.com";
-    memcpy(namedURLS, &helloWorld, sizeof(struct NamedURL));
-    namedURLS_size += 1;
-
-    struct NamedURL helloWorld2;
-    helloWorld2.name = "/gm";
-    helloWorld2.url = "https://gmail.com";
-    memcpy(namedURLS + sizeof(struct NamedURL), &helloWorld2, sizeof(struct NamedURL));
-    namedURLS_size += 1;
-
-
     // local address (returned after a bind)
     struct sockaddr_in my_addr;
     // peer address (returned after an accept)
     struct sockaddr_in peer_addr;
     socklen_t peer_addr_size = sizeof(peer_addr);
+
+    redisContext *redisctx = redisConnect("127.0.0.1", 6379);
+    if (redisctx -> err) {
+        fprintf(stderr, "connecting to redis resulted in an error: %s", redisctx->errstr);
+        exit(EXIT_FAILURE);
+    }
 
     // sfd represents a file descriptor in which will be used
     // for bind and accept operations
@@ -253,7 +238,7 @@ int main() {
         }
 
         if (strcmp(path, "/list") == 0) {
-            char *response = createListResponse(namedURLS, namedURLS_size);
+            char *response = createListResponse(redisctx);
             if (response != NULL) {
                 if (write(cfd, response, strlen(response)) == -1) {
                     perror("write to a peer connection for list response failed");
@@ -266,7 +251,7 @@ int main() {
             continue;
         }
 
-        char* longurl = getLongURL(namedURLS, namedURLS_size, path);
+        char* longurl = getLongURL(redisctx, path);
         if (longurl == NULL) {
             if (write(cfd, NOT_FOUND, strlen(NOT_FOUND)) == -1) {
                 perror("write to a peer connection for not found failed");
@@ -299,5 +284,4 @@ int main() {
 
     // unreachable code
     close(sfd);
-    free(namedURLS);
 }
